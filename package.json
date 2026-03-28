@@ -1,0 +1,14 @@
+{
+  "name": "ghl-claude-middleware",
+  "version": "1.0.0",
+  "description": "Middleware para conectar GoHighLevel con Claude API para ventas automatizadas por Instagram DM",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node --watch server.js"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.39.0",
+    "express": "^4.21.0"
+  }
+}
