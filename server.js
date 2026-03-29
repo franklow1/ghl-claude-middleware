@@ -554,14 +554,15 @@ async function callClaude(contactId, newMessage, tags, pipelineStage) {
 async function sendReplyToGHL(contactId, message) {
   try {
     const searchResponse = await fetch(
-      `https://services.leadconnectorhq.com/conversations/search?contactId=${contactId}`,
+      `https://services.leadconnectorhq.com/conversations/search?contactId=${contactId}&limit=1`,
       { method: "GET", headers: ghlHeaders("2021-04-15") }
     );
     const searchData = await searchResponse.json();
+    console.log(`Busqueda conversacion ${contactId}:`, JSON.stringify(searchData).substring(0, 300));
     const conversationId = searchData.conversations?.[0]?.id;
 
     if (!conversationId) {
-      console.error("No se encontro conversacion para contacto:", contactId);
+      console.error("No se encontro conversacion para contacto:", contactId, "| HTTP:", searchResponse.status);
       return;
     }
 
