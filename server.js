@@ -31,49 +31,42 @@ const ghlHeaders = (version = "2021-07-28") => ({
 const REDIS_TTL = 90 * 24 * 60 * 60; // 90 dias en segundos
 
 let redis = null;
-let redisReady = false;
+let redisConnected = false;
 
 try {
   const redisUrl = process.env.REDIS_URL || process.env.REDIS_PRIVATE_URL || "redis://localhost:6379";
-  redis = new Redis(redisUrl, { lazyConnect: true, connectTimeout: 5000, commandTimeout: 5000 });
-  redis.on("error", (err) => { console.error("Redis error:", err.message); redisReady = false; });
-  redis.on("ready", () => { console.log("Redis listo"); redisReady = true; });
-  redis.on("close", () => { redisReady = false; });
+  // commandTimeout: ioredis lanza error si el comando tarda mas de 5s — evita colgarse
+  redis = new Redis(redisUrl, { connectTimeout: 5000, commandTimeout: 5000, maxRetriesPerRequest: 1 });
+  redis.on("error", (err) => { if (redisConnected) console.error("Redis error:", err.message); redisConnected = false; });
+  redis.on("ready", () => { console.log("Redis listo"); redisConnected = true; });
+  redis.on("connect", () => { redisConnected = true; });
+  redis.on("close", () => { redisConnected = false; });
 } catch (e) {
-  console.error("Redis no disponible, usando solo memoria:", e.message);
+  console.error("Redis no disponible:", e.message);
   redis = null;
 }
 
-const REDIS_TIMEOUT = 4000; // 4 segundos max por operacion
-
-function withTimeout(promise, ms = REDIS_TIMEOUT) {
-  return Promise.race([
-    promise,
-    new Promise((_, reject) => setTimeout(() => reject(new Error("Redis timeout")), ms)),
-  ]);
-}
-
 async function rGet(key) {
-  if (!redis || !redisReady) return null;
-  try { return await withTimeout(redis.get(key)); } catch (e) { console.error(`rGet(${key}):`, e.message); return null; }
+  if (!redis) return null;
+  try { return await redis.get(key); } catch (e) { console.error(`rGet(${key}):`, e.message); return null; }
 }
 
 async function rSet(key, value, ttl) {
-  if (!redis || !redisReady) return;
+  if (!redis) return;
   try {
-    if (ttl) await withTimeout(redis.set(key, value, "EX", ttl));
-    else await withTimeout(redis.set(key, value));
+    if (ttl) await redis.set(key, value, "EX", ttl);
+    else await redis.set(key, value);
   } catch (e) { console.error(`rSet(${key}):`, e.message); }
 }
 
 async function rKeys(pattern) {
-  if (!redis || !redisReady) return [];
-  try { return await withTimeout(redis.keys(pattern)); } catch (e) { return []; }
+  if (!redis) return [];
+  try { return await redis.keys(pattern); } catch (e) { return []; }
 }
 
 async function rIncr(key) {
-  if (!redis || !redisReady) return 0;
-  try { return await withTimeout(redis.incr(key)); } catch (e) { return 0; }
+  if (!redis) return 0;
+  try { return await redis.incr(key); } catch (e) { return 0; }
 }
 
 // ============================================
@@ -1168,7 +1161,7 @@ app.get("/metrics", async (req, res) => {
       ultimo_playbook: playbookTs || null,
       objecion_mas_comun: objecionMasComun,
       perfil_que_mas_convierte: perfilQueMasConvierte,
-      redis_disponible: redisReady,
+      redis_disponible: redisConnected,
     });
   } catch (e) {
     console.error("Error en /metrics:", e);
@@ -1187,7 +1180,7 @@ app.get("/", (req, res) => {
     activeContacts: contactState.size,
     bufferedMessages: messageBuffer.size,
     playbookActivo: currentPlaybook !== null,
-    redisConectado: redisReady,
+    redisConectado: redisConnected,
   });
 });
 
@@ -1200,8 +1193,6 @@ async function start() {
   // Conectar Redis y cargar datos persistidos
   if (redis) {
     try {
-      await redis.connect();
-
       // Cargar playbook al arrancar
       const playbookData = await rGet("playbook:current");
       if (playbookData) {
