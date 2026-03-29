@@ -997,10 +997,28 @@ ${JSON.stringify(conv)}`,
 // ============================================
 app.post("/webhook/ghl", async (req, res) => {
   console.log("GHL PAYLOAD:", JSON.stringify(req.body));
-  const { contact_id, message, contact_name, tags, pipeline_stage } = req.body;
-  const messageText = typeof message === "string" ? message : (message?.body || message?.text || JSON.stringify(message) || "");
+  const body = req.body;
 
-  console.log(`Mensaje de ${contact_name} (${contact_id}): ${messageText}`);
+  // GHL envía el contactId en el root
+  const contact_id = body.contact_id || body.customData?.contact_id;
+
+  // El mensaje viene como objeto {type, body} o como string
+  const rawMessage = body.message;
+  const messageText = typeof rawMessage === "string"
+    ? rawMessage
+    : (rawMessage?.body || rawMessage?.text || body.customData?.message || "");
+
+  // El nombre viene en first_name o full_name en el root
+  const contact_name = body.first_name || body.full_name || body.customData?.contact_name || "Prospecto";
+
+  // Los tags reales vienen en el root como string separado por comas
+  const tagsRaw = body.tags || body.customData?.tags || "";
+  const tags = tagsRaw ? tagsRaw.split(",").map(t => t.trim()).filter(Boolean) : [];
+
+  // Pipeline stage viene en customData
+  const pipeline_stage = body.pipeline_stage || body.customData?.pipeline_stage || "";
+
+  console.log(`Mensaje de ${contact_name} (${contact_id}): ${messageText} | tags: [${tags}]`);
   res.status(200).json({ status: "processing" });
 
   // Agregar al buffer y esperar 10s por mas mensajes
