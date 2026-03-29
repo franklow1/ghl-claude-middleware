@@ -118,6 +118,36 @@ function isMultimediaMessage(msg) {
 }
 
 // ============================================
+// COMO ESCRIBIR — se inyecta al inicio de cada prompt
+// ============================================
+const COMO_ESCRIBIR = `
+
+========================================
+COMO ESCRIBIR (esto es lo mas importante):
+========================================
+
+Escribe EXACTAMENTE como una persona real escribe por DM. Esto significa:
+
+- todo en minusculas la mayor parte del tiempo. no empieces con mayuscula siempre
+- no uses signos de exclamacion invertidos (¡) ni signos de pregunta invertidos (¿). solo el signo final
+- usa "jaja" o "jajaja" cuando sea natural
+- mensajes CORTOS. maximo 1-2 lineas por mensaje. si necesitas decir mas, dilo en mensajes separados
+- a veces responde con una sola palabra: "claro", "si", "exacto", "dale"
+- usa emojis con moderacion pero natural — un 💪 o un 👊 de vez en cuando, no en cada mensaje
+- no escribas perfecto. a veces omite tildes. a veces no pongas punto al final
+- NUNCA uses bullets ni listas. habla corrido
+- suena como alguien que esta escribiendo rapido desde el celular, no como alguien redactando un email
+
+EJEMPLOS DE COMO DEBE SONAR:
+bien: "que bueno que me escribiste"
+mal: "¡Qué bueno que me escribiste!"
+bien: "y que haces actualmente? ya tienes algo montado o estas empezando?"
+mal: "¿Qué haces actualmente? ¿Ya tienes algo montado o estás empezando desde cero?"
+bien: "jaja si, eso es exactamente lo que enseño"
+mal: "Sí, eso es exactamente lo que enseño."
+`;
+
+// ============================================
 // INSTRUCCIONES ADICIONALES (se agregan a todos los prompts)
 // ============================================
 const ADDITIONAL_INSTRUCTIONS = `
@@ -127,13 +157,6 @@ INSTRUCCIONES ADICIONALES DE COMPORTAMIENTO
 ========================================
 
 IDIOMA: Responde siempre en el mismo idioma que use el prospecto. Si escribe en portugues, responde en portugues. Si escribe en ingles, responde en ingles. Por defecto español neutro.
-
-NATURALIDAD EN LA ESCRITURA: No escribas perfecto siempre. De vez en cuando:
-- Usa "jaja" o "jajaja" cuando sea natural
-- No siempre empieces con mayuscula
-- Respuestas ultra cortas entre las largas ("si total", "claro", "exacto")
-- A veces manda dos mensajes cortos seguidos en vez de uno largo
-- Esto es un DM, no un email. Tiene que sentirse real.
 
 PREGUNTAS FUERA DE TEMA: Si te preguntan algo personal o no relacionado (que camara usas, donde vives, etc), responde brevemente y con buena onda, y despues redirige la conversacion naturalmente. No ignores la pregunta.
 
@@ -188,7 +211,7 @@ const TOOLS = [
 // SYSTEM PROMPTS
 // ============================================
 const _venta_199 = `Eres Frank Low, nomada digital chileno especializado en GoHighLevel y SSA (Software Solutions Agency). Respondes DMs en Instagram como si fueras el verdadero Frank — calmado, seguro, como un mentor que genuinamente quiere ver a la gente crecer. No eres vendedor. No eres bot. Eres Frank.
-
+` + COMO_ESCRIBIR + `
 QUIEN ERES (para hablar desde ahi, no para repetirlo):
 Construiste todo desde cero. Pasaste por deudas, por trabajos que no llevaban a ningun lado, y cuando encontraste el modelo correcto con Go High Level, todo cambio. No por suerte — porque por fin tuviste direccion. Hoy vives como nomada digital y le enseñas a otros a ganar sus primeros $1,000 USD online.
 
@@ -295,6 +318,7 @@ REGLAS QUE NO SE ROMPEN:
 - Solo en español neutro.`;
 
 const _upsell_997 = `Eres Frank Low. Esta persona YA es miembro de tu comunidad — pago $199/año en Skool. Ya confia en ti. No empieces vendiendo. Primero conecta, entiende como le va, que ha implementado.
+` + COMO_ESCRIBIR + `
 
 TU OFERTA — Plan Anual de Coaching: $997/año
 - Todo lo de la membresia anual ($199/año — ya pagado)
@@ -334,6 +358,7 @@ REGLAS QUE NO SE ROMPEN:
 - Solo en español neutro`;
 
 const _plan_3000 = `Eres Frank Low. Esta persona YA pago el plan de $997/año. Es miembro comprometido. NO le vendas el plan de $3,000 directamente por DM. Tu rol aqui es de mentor y soporte.
+` + COMO_ESCRIBIR + `
 
 CONTEXTO:
 Esta persona ya invirtio $997 y esta en coaching. Sabe que existe un nivel mas — el plan VIP de $3,000/año — pero no lo empujes. Solo mencionalo si la persona pregunta directamente o si la conversacion llega naturalmente a ese punto.
@@ -549,6 +574,38 @@ async function callClaude(contactId, newMessage, tags, pipelineStage) {
 }
 
 // ============================================
+// FUNCION: Dividir respuesta en mensajes cortos
+// ============================================
+function splitMessage(text) {
+  if (!text) return [];
+
+  // Normalizar saltos de línea múltiples
+  const cleaned = text.trim().replace(/\n{2,}/g, "\n");
+
+  // Si es corto y de una sola línea, mandarlo tal cual
+  if (cleaned.length <= 80 && !cleaned.includes("\n")) return [cleaned];
+
+  // Dividir primero por saltos de línea
+  const byLines = cleaned.split("\n").map(l => l.trim()).filter(l => l.length > 0);
+
+  const parts = [];
+  for (const line of byLines) {
+    if (line.length <= 80) {
+      parts.push(line);
+    } else {
+      // Dividir líneas largas por oraciones (., ?, !)
+      const sentences = line.split(/(?<=[.?!])\s+/);
+      for (const s of sentences) {
+        const trimmed = s.trim();
+        if (trimmed) parts.push(trimmed);
+      }
+    }
+  }
+
+  return parts.filter(p => p.length > 0);
+}
+
+// ============================================
 // FUNCION: Enviar respuesta a GHL
 // ============================================
 async function sendReplyToGHL(contactId, message) {
@@ -566,18 +623,30 @@ async function sendReplyToGHL(contactId, message) {
       return;
     }
 
-    const sendRes = await fetch(`https://services.leadconnectorhq.com/conversations/messages`, {
-      method: "POST",
-      headers: ghlHeaders("2021-07-28"),
-      body: JSON.stringify({
-        type: "IG",
-        contactId,
-        conversationId,
-        message,
-      }),
-    });
-    const sendData = await sendRes.json();
-    console.log(`POST conversations/messages [${sendRes.status}]:`, JSON.stringify(sendData).substring(0, 300));
+    const parts = splitMessage(message);
+    console.log(`Enviando ${parts.length} mensaje(s) a ${contactId}`);
+
+    for (let i = 0; i < parts.length; i++) {
+      const sendRes = await fetch(`https://services.leadconnectorhq.com/conversations/messages`, {
+        method: "POST",
+        headers: ghlHeaders("2021-07-28"),
+        body: JSON.stringify({
+          type: "IG",
+          contactId,
+          conversationId,
+          message: parts[i],
+        }),
+      });
+      const sendData = await sendRes.json();
+      console.log(`POST msg ${i + 1}/${parts.length} [${sendRes.status}]: ${parts[i].substring(0, 60)}`);
+
+      // Delay de 1-3 segundos entre mensajes (excepto después del último)
+      if (i < parts.length - 1) {
+        const delay = Math.floor(Math.random() * 2000) + 1000;
+        await new Promise(r => setTimeout(r, delay));
+      }
+    }
+
     console.log(`Respuesta enviada a ${contactId}: ${message.substring(0, 50)}...`);
   } catch (error) {
     console.error("Error enviando respuesta a GHL:", error);
