@@ -570,7 +570,7 @@ async function sendReplyToGHL(contactId, message) {
       method: "POST",
       headers: ghlHeaders("2021-07-28"),
       body: JSON.stringify({
-        type: "InstagramDM",
+        type: "IG",
         contactId,
         conversationId,
         message,
