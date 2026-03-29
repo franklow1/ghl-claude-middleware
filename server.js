@@ -25,13 +25,74 @@ const ghlHeaders = (version = "2021-07-28") => ({
 });
 
 // ============================================
-// ALMACEN DE CONVERSACIONES (en memoria)
-// Para produccion usa Redis o una base de datos
+// ALMACEN DE CONVERSACIONES
 // ============================================
 const conversations = {};
 
 // ============================================
-// TOOLS: Herramientas que Claude puede usar
+// ALMACEN DE ESTADO POR CONTACTO
+// ============================================
+// Por contacto guarda:
+//   prospectTimestamps: [],  timestamps de mensajes del prospecto
+//   claudeTimestamps: [],    timestamps de respuestas de Claude
+//   followUpCount: 0,        cuantos follow-ups se han mandado (0-3)
+//   mode: 'conversacion',    'conversacion' | 'post_link'
+//   followUpTimers: [],      IDs de setTimeout para cancelar
+//   tags: [],
+//   pipelineStage: ''
+const contactState = new Map();
+
+// ============================================
+// BUFFER DE MENSAJES (agrupacion 10s)
+// ============================================
+const messageBuffer = new Map();
+
+// ============================================
+// DETECCION DE MULTIMEDIA
+// ============================================
+const MULTIMEDIA_MARKERS = [
+  "[audio]", "[imagen]", "[image]", "[video]", "[sticker]", "[gif]",
+  "audio message", "voice message", "🎤", "🎵", "🎧",
+];
+
+function isMultimediaMessage(msg) {
+  if (!msg || msg.trim() === "") return true;
+  const lower = msg.toLowerCase().trim();
+  return MULTIMEDIA_MARKERS.some((m) => lower.includes(m));
+}
+
+// ============================================
+// INSTRUCCIONES ADICIONALES (se agregan a todos los prompts)
+// ============================================
+const ADDITIONAL_INSTRUCTIONS = `
+
+========================================
+INSTRUCCIONES ADICIONALES DE COMPORTAMIENTO
+========================================
+
+IDIOMA: Responde siempre en el mismo idioma que use el prospecto. Si escribe en portugues, responde en portugues. Si escribe en ingles, responde en ingles. Por defecto español neutro.
+
+NATURALIDAD EN LA ESCRITURA: No escribas perfecto siempre. De vez en cuando:
+- Usa "jaja" o "jajaja" cuando sea natural
+- No siempre empieces con mayuscula
+- Respuestas ultra cortas entre las largas ("si total", "claro", "exacto")
+- A veces manda dos mensajes cortos seguidos en vez de uno largo
+- Esto es un DM, no un email. Tiene que sentirse real.
+
+PREGUNTAS FUERA DE TEMA: Si te preguntan algo personal o no relacionado (que camara usas, donde vives, etc), responde brevemente y con buena onda, y despues redirige la conversacion naturalmente. No ignores la pregunta.
+
+REACCIONES A STORIES: Si alguien responde con solo un emoji, una reaccion, o algo tipo "jajaja buenisimo", no le vendas inmediatamente. Responde casual y pregunta si le interesa saber mas sobre lo que haces.
+
+DETECCION DE COMPETIDORES: Si alguien hace preguntas muy tecnicas sobre tu modelo de negocio, tus numeros exactos, tu estructura de precios, cuantos alumnos tienes, o suena como si estuviera investigando en vez de comprando, no des informacion detallada. Redirige: "eso lo vemos adentro de la comunidad" o "depende de cada caso".
+
+MULTIPLES MENSAJES: Si recibes varios mensajes concatenados del prospecto, responde a todo de forma coherente como si fuera una sola conversacion. No ignores ninguna parte.
+
+MANEJO DE YA COMPRE: Si alguien dice que ya pago o ya compro pero el sistema todavia no lo refleja, responde: "que bueno que entraste, a veces tarda unos minutos en activarse. Si en un rato no te llega el acceso me escribes y lo revisamos." No sigas vendiendo.
+
+MANEJO DE QUEJAS O PROBLEMAS: Si alguien tiene un problema tecnico, una queja, o necesita soporte que no puedes resolver, responde con empatia y di: "dejame revisarlo y te escribo en un momento." Esto le da tiempo a Frank de intervenir manualmente.`;
+
+// ============================================
+// TOOLS
 // ============================================
 const TOOLS = [
   {
@@ -68,13 +129,9 @@ const TOOLS = [
 ];
 
 // ============================================
-// SYSTEM PROMPTS POR ETAPA
+// SYSTEM PROMPTS
 // ============================================
-const SYSTEM_PROMPTS = {
-  // ----------------------------------------
-  // ETAPA 1: Venta de membresia $29/mes
-  // ----------------------------------------
-  venta_29: `Eres Frank Low, nomada digital chileno especializado en GoHighLevel y SSA (Software Solutions Agency). Respondes DMs en Instagram como si fueras el verdadero Frank — calmado, seguro, como un mentor que genuinamente quiere ver a la gente crecer. No eres vendedor. No eres bot. Eres Frank.
+const _venta_29 = `Eres Frank Low, nomada digital chileno especializado en GoHighLevel y SSA (Software Solutions Agency). Respondes DMs en Instagram como si fueras el verdadero Frank — calmado, seguro, como un mentor que genuinamente quiere ver a la gente crecer. No eres vendedor. No eres bot. Eres Frank.
 
 QUIEN ERES (para hablar desde ahi, no para repetirlo):
 Construiste todo desde cero. Pasaste por deudas, por trabajos que no llevaban a ningun lado, y cuando encontraste el modelo correcto con Go High Level, todo cambio. No por suerte — porque por fin tuviste direccion. Hoy vives como nomada digital y le enseñas a otros a ganar sus primeros $1,000 USD online.
@@ -178,12 +235,9 @@ REGLAS QUE NO SE ROMPEN:
 - Sin listas con bullets en los DMs — habla como persona.
 - NUNCA inventar testimonios ni numeros que no esten en este prompt.
 - NUNCA decir que eres IA ni bot.
-- Solo en español neutro.`,
+- Solo en español neutro.`;
 
-  // ----------------------------------------
-  // ETAPA 2: Upsell $997/año (miembro activo)
-  // ----------------------------------------
-  upsell_997: `Eres Frank Low. Esta persona YA es miembro de tu comunidad de $29/mes en Skool. Ya confia en ti — pago. No empieces vendiendo. Primero conecta, entiende como le va, que ha implementado.
+const _upsell_997 = `Eres Frank Low. Esta persona YA es miembro de tu comunidad de $29/mes en Skool. Ya confia en ti — pago. No empieces vendiendo. Primero conecta, entiende como le va, que ha implementado.
 
 TU OFERTA — Plan Anual de Coaching: $997/año
 - Todo lo de la membresia mensual ($29/mes = $348/año — se ahorran dinero solo en precio)
@@ -220,12 +274,9 @@ REGLAS QUE NO SE ROMPEN:
 - La garantia es tu argumento mas fuerte — usala con confianza, sin exagerar
 - Si dice que no, respeta. No insistas mas de 2 veces
 - NUNCA decir que eres IA ni bot
-- Solo en español neutro`,
+- Solo en español neutro`;
 
-  // ----------------------------------------
-  // ETAPA 3: Plan VIP $3,000/año (post-997)
-  // ----------------------------------------
-  plan_3000: `Eres Frank Low. Esta persona YA pago el plan de $997/año. Es miembro comprometido. NO le vendas el plan de $3,000 directamente por DM. Tu rol aqui es de mentor y soporte.
+const _plan_3000 = `Eres Frank Low. Esta persona YA pago el plan de $997/año. Es miembro comprometido. NO le vendas el plan de $3,000 directamente por DM. Tu rol aqui es de mentor y soporte.
 
 CONTEXTO:
 Esta persona ya invirtio $997 y esta en coaching. Sabe que existe un nivel mas — el plan VIP de $3,000/año — pero no lo empujes. Solo mencionalo si la persona pregunta directamente o si la conversacion llega naturalmente a ese punto.
@@ -247,23 +298,22 @@ REGLAS QUE NO SE ROMPEN:
 - NO vendas el plan de $3,000 a menos que la conversacion lo pida
 - Respuestas de 2-5 lineas
 - NUNCA decir que eres IA ni bot
-- Solo en español neutro`
+- Solo en español neutro`;
+
+const SYSTEM_PROMPTS = {
+  venta_29: _venta_29 + ADDITIONAL_INSTRUCTIONS,
+  upsell_997: _upsell_997 + ADDITIONAL_INSTRUCTIONS,
+  plan_3000: _plan_3000 + ADDITIONAL_INSTRUCTIONS,
 };
 
 // ============================================
 // FUNCION: Determinar que prompt usar
 // ============================================
 function getSystemPrompt(tags, pipelineStage) {
-  if (
-    tags?.includes("plan_3000") ||
-    pipelineStage === "plan_vip"
-  ) {
+  if (tags?.includes("plan_3000") || pipelineStage === "plan_vip") {
     return SYSTEM_PROMPTS.plan_3000;
   }
-  if (
-    tags?.includes("plan_997") ||
-    pipelineStage === "plan_997"
-  ) {
+  if (tags?.includes("plan_997") || pipelineStage === "plan_997") {
     return SYSTEM_PROMPTS.plan_3000;
   }
   if (
@@ -281,22 +331,49 @@ function getSystemPrompt(tags, pipelineStage) {
 // ============================================
 async function saveEmailToGHL(contactId, email) {
   try {
-    await fetch(
-      `https://services.leadconnectorhq.com/contacts/${contactId}`,
-      {
-        method: "PUT",
-        headers: ghlHeaders("2021-07-28"),
-        body: JSON.stringify({
-          email: email,
-          tags: ["email_capturado"],
-        }),
-      }
-    );
+    await fetch(`https://services.leadconnectorhq.com/contacts/${contactId}`, {
+      method: "PUT",
+      headers: ghlHeaders("2021-07-28"),
+      body: JSON.stringify({ email, tags: ["email_capturado"] }),
+    });
     console.log(`Email guardado para contacto ${contactId}: ${email}`);
     return true;
   } catch (error) {
     console.error("Error guardando email en GHL:", error);
     return false;
+  }
+}
+
+// ============================================
+// FUNCION: Agregar tag en GHL
+// ============================================
+async function addTagToGHL(contactId, tag) {
+  try {
+    await fetch(`https://services.leadconnectorhq.com/contacts/${contactId}`, {
+      method: "PUT",
+      headers: ghlHeaders("2021-07-28"),
+      body: JSON.stringify({ tags: [tag] }),
+    });
+  } catch (error) {
+    console.error(`Error agregando tag ${tag} a ${contactId}:`, error);
+  }
+}
+
+// ============================================
+// FUNCION: Remover tag en GHL
+// ============================================
+async function removeTagFromGHL(contactId, tag) {
+  try {
+    await fetch(
+      `https://services.leadconnectorhq.com/contacts/${contactId}/tags`,
+      {
+        method: "DELETE",
+        headers: ghlHeaders("2021-07-28"),
+        body: JSON.stringify({ tags: [tag] }),
+      }
+    );
+  } catch (error) {
+    console.error(`Error removiendo tag ${tag} de ${contactId}:`, error);
   }
 }
 
@@ -325,6 +402,9 @@ async function processToolCalls(response, contactId) {
           block.input.plan === "membresia_29"
             ? SKOOL_PAYMENT_LINK_29
             : SKOOL_PAYMENT_LINK_997;
+        // Cambiar modo a post_link para follow-ups
+        const state = contactState.get(contactId);
+        if (state) state.mode = "post_link";
         toolResults.push({
           type: "tool_result",
           tool_use_id: block.id,
@@ -338,17 +418,12 @@ async function processToolCalls(response, contactId) {
 }
 
 // ============================================
-// FUNCION: Llamar a Claude API con tools
+// FUNCION: Llamar a Claude API
 // ============================================
 async function callClaude(contactId, newMessage, tags, pipelineStage) {
-  if (!conversations[contactId]) {
-    conversations[contactId] = [];
-  }
+  if (!conversations[contactId]) conversations[contactId] = [];
 
-  conversations[contactId].push({
-    role: "user",
-    content: newMessage,
-  });
+  conversations[contactId].push({ role: "user", content: newMessage });
 
   if (conversations[contactId].length > 30) {
     conversations[contactId] = conversations[contactId].slice(-30);
@@ -365,22 +440,11 @@ async function callClaude(contactId, newMessage, tags, pipelineStage) {
       tools: TOOLS,
     });
 
-    let { textResponse, toolResults } = await processToolCalls(
-      response,
-      contactId
-    );
+    let { textResponse, toolResults } = await processToolCalls(response, contactId);
 
-    // Si Claude uso herramientas, hacer segunda llamada para mensaje final
     if (toolResults.length > 0) {
-      conversations[contactId].push({
-        role: "assistant",
-        content: response.content,
-      });
-
-      conversations[contactId].push({
-        role: "user",
-        content: toolResults,
-      });
+      conversations[contactId].push({ role: "assistant", content: response.content });
+      conversations[contactId].push({ role: "user", content: toolResults });
 
       response = await anthropic.messages.create({
         model: "claude-sonnet-4-20250514",
@@ -397,11 +461,7 @@ async function callClaude(contactId, newMessage, tags, pipelineStage) {
     const finalMessage =
       textResponse || "Hey, perdona, tuve un problema. Escribeme de nuevo.";
 
-    conversations[contactId].push({
-      role: "assistant",
-      content: finalMessage,
-    });
-
+    conversations[contactId].push({ role: "assistant", content: finalMessage });
     return finalMessage;
   } catch (error) {
     console.error("Error llamando a Claude:", error);
@@ -410,16 +470,13 @@ async function callClaude(contactId, newMessage, tags, pipelineStage) {
 }
 
 // ============================================
-// FUNCION: Enviar respuesta de vuelta a GHL
+// FUNCION: Enviar respuesta a GHL
 // ============================================
 async function sendReplyToGHL(contactId, message) {
   try {
     const searchResponse = await fetch(
       `https://services.leadconnectorhq.com/conversations/search?contactId=${contactId}`,
-      {
-        method: "GET",
-        headers: ghlHeaders("2021-04-15"),
-      }
+      { method: "GET", headers: ghlHeaders("2021-04-15") }
     );
     const searchData = await searchResponse.json();
     const conversationId = searchData.conversations?.[0]?.id;
@@ -429,58 +486,279 @@ async function sendReplyToGHL(contactId, message) {
       return;
     }
 
-    await fetch(
-      `https://services.leadconnectorhq.com/conversations/messages`,
-      {
-        method: "POST",
-        headers: ghlHeaders("2021-04-15"),
-        body: JSON.stringify({
-          type: "InstagramDM",
-          contactId: contactId,
-          conversationId: conversationId,
-          message: message,
-        }),
-      }
-    );
+    await fetch(`https://services.leadconnectorhq.com/conversations/messages`, {
+      method: "POST",
+      headers: ghlHeaders("2021-04-15"),
+      body: JSON.stringify({
+        type: "InstagramDM",
+        contactId,
+        conversationId,
+        message,
+      }),
+    });
 
-    console.log(
-      `Respuesta enviada a ${contactId}: ${message.substring(0, 50)}...`
-    );
+    console.log(`Respuesta enviada a ${contactId}: ${message.substring(0, 50)}...`);
   } catch (error) {
     console.error("Error enviando respuesta a GHL:", error);
   }
 }
 
 // ============================================
-// ENDPOINT: Recibe webhooks de GHL (mensajes)
+// SISTEMA DE FOLLOW-UP
+// ============================================
+
+function getOrCreateState(contactId, tags, pipelineStage) {
+  if (!contactState.has(contactId)) {
+    contactState.set(contactId, {
+      prospectTimestamps: [],
+      claudeTimestamps: [],
+      followUpCount: 0,
+      mode: "conversacion",
+      followUpTimers: [],
+      tags: tags || [],
+      pipelineStage: pipelineStage || "",
+    });
+  }
+  return contactState.get(contactId);
+}
+
+// Calcula el ritmo promedio de respuesta del prospecto en ms
+function calcAvgRhythm(timestamps) {
+  if (timestamps.length < 2) return 15 * 60 * 1000; // default 15 min
+  const diffs = [];
+  for (let i = 1; i < timestamps.length; i++) {
+    diffs.push(timestamps[i] - timestamps[i - 1]);
+  }
+  return diffs.reduce((a, b) => a + b, 0) / diffs.length;
+}
+
+// Calcula delay del primer follow-up: doble del ritmo, entre 10 y 30 min
+function calcFirstFollowUpDelay(state) {
+  const avg = calcAvgRhythm(state.prospectTimestamps);
+  const delay = avg * 2;
+  const min = 10 * 60 * 1000;
+  const max = 30 * 60 * 1000;
+  return Math.min(Math.max(delay, min), max);
+}
+
+function isWithinHours() {
+  const hour = new Date().getHours();
+  return hour >= 8 && hour <= 23;
+}
+
+function msUntil9amTomorrow() {
+  const tomorrow = new Date();
+  tomorrow.setDate(tomorrow.getDate() + 1);
+  tomorrow.setHours(9, Math.floor(Math.random() * 5), 0, 0); // 9:00-9:04 para no parecer automatico
+  return tomorrow - Date.now();
+}
+
+function cancelFollowUpTimers(contactId) {
+  const state = contactState.get(contactId);
+  if (!state) return;
+  state.followUpTimers.forEach((t) => clearTimeout(t));
+  state.followUpTimers = [];
+  console.log(`Timers de follow-up cancelados para ${contactId}`);
+}
+
+function scheduleOneFollowUp(contactId, delayMs, followUpNumber, instruction) {
+  const state = contactState.get(contactId);
+  if (!state) return;
+
+  const execute = async () => {
+    const currentState = contactState.get(contactId);
+    if (!currentState) return;
+
+    if (!isWithinHours()) {
+      console.log(`Follow-up ${followUpNumber} fuera de horario, reagendando a las 9am`);
+      const timer = setTimeout(execute, msUntil9amTomorrow());
+      currentState.followUpTimers.push(timer);
+      return;
+    }
+
+    currentState.followUpCount = followUpNumber;
+    console.log(`Ejecutando follow-up ${followUpNumber} para ${contactId} (modo: ${currentState.mode})`);
+
+    const followUpPrompt =
+      getSystemPrompt(currentState.tags, currentState.pipelineStage) +
+      `\n\n========================================\nINSTRUCCION ESPECIAL PARA ESTE MENSAJE (follow-up ${followUpNumber})\n========================================\n${instruction}`;
+
+    try {
+      const response = await anthropic.messages.create({
+        model: "claude-sonnet-4-20250514",
+        max_tokens: 200,
+        system: followUpPrompt,
+        messages: conversations[contactId] || [],
+        tools: TOOLS,
+      });
+
+      let text = "";
+      for (const block of response.content) {
+        if (block.type === "text") text += block.text;
+      }
+
+      if (!text) return;
+
+      if (!conversations[contactId]) conversations[contactId] = [];
+      conversations[contactId].push({ role: "assistant", content: text });
+
+      await sendReplyToGHL(contactId, text);
+      currentState.claudeTimestamps.push(Date.now());
+
+      if (followUpNumber >= 3) {
+        await addTagToGHL(contactId, "lead_frio");
+        console.log(`Contacto ${contactId} marcado como lead_frio`);
+      }
+    } catch (error) {
+      console.error(`Error en follow-up ${followUpNumber} para ${contactId}:`, error);
+    }
+  };
+
+  const timer = setTimeout(execute, delayMs);
+  state.followUpTimers.push(timer);
+}
+
+function scheduleFollowUps(contactId) {
+  const state = contactState.get(contactId);
+  if (!state) return;
+
+  cancelFollowUpTimers(contactId);
+  state.followUpCount = 0;
+
+  if (state.mode === "conversacion") {
+    const fu1Delay = calcFirstFollowUpDelay(state);
+
+    scheduleOneFollowUp(
+      contactId,
+      fu1Delay,
+      1,
+      `El prospecto dejo de responder. Analiza el ultimo intercambio e infiere por que se enfrio. No mandes un "follow-up". Manda algo que parezca que se te acaba de ocurrir y que sea relevante a su situacion especifica. Puede ser un testimonio nuevo, algo que acabas de ver, o un angulo diferente que conecte con el dolor que te compartio. NO digas "oye no se si viste mi mensaje" ni "te escribo de nuevo". Maximo 2 lineas. Tiene que sonar como un mensaje nuevo, no como persecucion.`
+    );
+
+    scheduleOneFollowUp(
+      contactId,
+      6 * 60 * 60 * 1000,
+      2,
+      `Pasaron varias horas sin respuesta. Analiza que fue lo ultimo que se dijo y por que pudo haberse enfriado. Si parece que tenia una duda sin resolver, resuelvela sin que te la pida. Si parece que necesitaba mas prueba social, comparte un resultado diferente. Si simplemente se distrajo, manda algo que aporte valor puro. Maximo 2 lineas. Que se sienta como contenido, no como seguimiento.`
+    );
+
+    scheduleOneFollowUp(
+      contactId,
+      24 * 60 * 60 * 1000,
+      3,
+      `Ultimo mensaje. Algo breve y sin presion tipo "por cierto, si algun dia quieres retomar esto me escribes y seguimos donde nos quedamos". Despues de esto no se mandan mas mensajes a menos que el prospecto escriba primero.`
+    );
+  } else {
+    // post_link
+    scheduleOneFollowUp(
+      contactId,
+      2 * 60 * 60 * 1000,
+      1,
+      `El prospecto tiene el link pero no ha pagado. NO preguntes si pago. Manda algo que refuerce la decision — un resultado especifico de alguien similar, algo que va a encontrar adentro, o anticipa una duda comun y resuelvela. Maximo 2 lineas.`
+    );
+
+    scheduleOneFollowUp(
+      contactId,
+      24 * 60 * 60 * 1000,
+      2,
+      `Un dia despues. Manda algo natural que aporte valor y sutilmente recuerde la oportunidad. Puede ser "por cierto, si te genera duda algo del proceso me dices". Sin presion.`
+    );
+
+    scheduleOneFollowUp(
+      contactId,
+      72 * 60 * 60 * 1000,
+      3,
+      `Ultimo mensaje. "Sin presion, cuando estes listo aqui estoy." Corto. Despues de esto no se mandan mas.`
+    );
+  }
+
+  console.log(`Follow-ups agendados para ${contactId} (modo: ${state.mode})`);
+}
+
+// ============================================
+// PROCESAMIENTO DE MENSAJES AGRUPADOS
+// ============================================
+async function processBufferedMessages(contactId) {
+  const buffer = messageBuffer.get(contactId);
+  if (!buffer || buffer.messages.length === 0) return;
+
+  const combinedMessage = buffer.messages.join("\n");
+  const { tags, pipelineStage, contactName } = buffer;
+  messageBuffer.delete(contactId);
+
+  console.log(
+    `Procesando ${buffer.messages.length} msg(s) de ${contactName} (${contactId}): ${combinedMessage.substring(0, 80)}`
+  );
+
+  // Manejo de multimedia / mensaje vacio
+  if (isMultimediaMessage(combinedMessage)) {
+    const response = "jaja perdona, ahora no puedo escuchar audios, me lo escribes?";
+    if (!conversations[contactId]) conversations[contactId] = [];
+    conversations[contactId].push({ role: "assistant", content: response });
+    await sendReplyToGHL(contactId, response);
+    return;
+  }
+
+  // Actualizar estado del contacto
+  const state = getOrCreateState(contactId, tags, pipelineStage);
+  state.prospectTimestamps.push(Date.now());
+  state.tags = tags || state.tags;
+  state.pipelineStage = pipelineStage || state.pipelineStage;
+
+  // Cancelar follow-ups pendientes (el prospecto respondio)
+  cancelFollowUpTimers(contactId);
+
+  // Remover tag lead_frio si existia
+  await removeTagFromGHL(contactId, "lead_frio");
+
+  // Verificar horario
+  const hour = new Date().getHours();
+  if (hour < 8 || hour > 23) {
+    console.log(`Fuera de horario para ${contactId}, ignorando`);
+    return;
+  }
+
+  // Delay aleatorio (parecer humano)
+  const delay = Math.floor(Math.random() * (90 - 30 + 1)) + 30;
+  console.log(`Esperando ${delay}s antes de responder a ${contactId}...`);
+  await new Promise((resolve) => setTimeout(resolve, delay * 1000));
+
+  // Llamar a Claude
+  const claudeResponse = await callClaude(contactId, combinedMessage, tags, pipelineStage);
+  state.claudeTimestamps.push(Date.now());
+
+  // Enviar respuesta
+  await sendReplyToGHL(contactId, claudeResponse);
+
+  // Agendar follow-ups
+  scheduleFollowUps(contactId);
+}
+
+// ============================================
+// ENDPOINT: Webhooks de GHL
 // ============================================
 app.post("/webhook/ghl", async (req, res) => {
   const { contact_id, message, contact_name, tags, pipeline_stage } = req.body;
 
   console.log(`Mensaje de ${contact_name} (${contact_id}): ${message}`);
-
   res.status(200).json({ status: "processing" });
 
-  // Delay aleatorio de 30-90 segundos para parecer humano
-  const delay = Math.floor(Math.random() * (90 - 30 + 1)) + 30;
-  console.log(`Esperando ${delay} segundos antes de responder...`);
-  await new Promise((resolve) => setTimeout(resolve, delay * 1000));
-
-  // Verificar horario (8am - 11pm hora local)
-  const hour = new Date().getHours();
-  if (hour < 8 || hour > 23) {
-    console.log("Fuera de horario, mensaje encolado para manana");
-    return;
+  // Agregar al buffer y esperar 10s por mas mensajes
+  if (messageBuffer.has(contact_id)) {
+    const buffer = messageBuffer.get(contact_id);
+    buffer.messages.push(message);
+    clearTimeout(buffer.timer);
+    buffer.timer = setTimeout(() => processBufferedMessages(contact_id), 10000);
+  } else {
+    const timer = setTimeout(() => processBufferedMessages(contact_id), 10000);
+    messageBuffer.set(contact_id, {
+      messages: [message],
+      timer,
+      tags,
+      pipelineStage: pipeline_stage,
+      contactName: contact_name,
+    });
   }
-
-  const claudeResponse = await callClaude(
-    contact_id,
-    message,
-    tags,
-    pipeline_stage
-  );
-
-  await sendReplyToGHL(contact_id, claudeResponse);
 });
 
 // ============================================
@@ -498,32 +776,27 @@ app.post("/webhook/stripe", async (req, res) => {
     try {
       const searchRes = await fetch(
         `https://services.leadconnectorhq.com/contacts/search/duplicate?email=${email}`,
-        {
-          headers: ghlHeaders("2021-07-28"),
-        }
+        { headers: ghlHeaders("2021-07-28") }
       );
       const searchData = await searchRes.json();
       const contactId = searchData.contact?.id;
 
       if (contactId) {
         let newTag = "miembro_activo";
-        if (amount >= 300000) {
-          newTag = "plan_3000";
-        } else if (amount >= 99700) {
-          newTag = "plan_997";
-        }
+        if (amount >= 300000) newTag = "plan_3000";
+        else if (amount >= 99700) newTag = "plan_997";
 
         await fetch(
           `https://services.leadconnectorhq.com/contacts/${contactId}`,
           {
             method: "PUT",
             headers: ghlHeaders("2021-07-28"),
-            body: JSON.stringify({
-              tags: [newTag],
-            }),
+            body: JSON.stringify({ tags: [newTag] }),
           }
         );
 
+        // Cancelar follow-ups post_link si pago
+        cancelFollowUpTimers(contactId);
         console.log(`Contacto ${contactId} actualizado: tag=${newTag}`);
       } else {
         console.log(`No se encontro contacto con email ${email} en GHL`);
@@ -547,9 +820,7 @@ app.post("/webhook/skool", async (req, res) => {
   try {
     const searchRes = await fetch(
       `https://services.leadconnectorhq.com/contacts/search/duplicate?email=${email}`,
-      {
-        headers: ghlHeaders("2021-07-28"),
-      }
+      { headers: ghlHeaders("2021-07-28") }
     );
     const searchData = await searchRes.json();
     const contactId = searchData.contact?.id;
@@ -560,11 +831,10 @@ app.post("/webhook/skool", async (req, res) => {
         {
           method: "PUT",
           headers: ghlHeaders("2021-07-28"),
-          body: JSON.stringify({
-            tags: ["miembro_activo"],
-          }),
+          body: JSON.stringify({ tags: ["miembro_activo"] }),
         }
       );
+      cancelFollowUpTimers(contactId);
       console.log(`Miembro Skool ${email} vinculado a contacto ${contactId}`);
     }
   } catch (error) {
@@ -580,8 +850,10 @@ app.post("/webhook/skool", async (req, res) => {
 app.get("/", (req, res) => {
   res.json({
     status: "running",
-    service: "GHL-Claude Sales Middleware v2",
+    service: "GHL-Claude Sales Middleware v3",
     timestamp: new Date().toISOString(),
+    activeContacts: contactState.size,
+    bufferedMessages: messageBuffer.size,
   });
 });
 
