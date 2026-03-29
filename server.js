@@ -9,11 +9,21 @@ app.use(express.json());
 // ============================================
 const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY || "tu-api-key-aqui";
 const GHL_API_KEY = process.env.GHL_API_KEY || "tu-ghl-api-key-aqui";
+const GHL_LOCATION_ID = process.env.GHL_LOCATION_ID || "tu-location-id";
 const SKOOL_PAYMENT_LINK_29 = process.env.SKOOL_PAYMENT_LINK_29 || "https://www.skool.com/tu-comunidad";
 const SKOOL_PAYMENT_LINK_997 = process.env.SKOOL_PAYMENT_LINK_997 || "https://www.skool.com/tu-comunidad/plan-anual";
 const GHL_PIPELINE_ID = process.env.GHL_PIPELINE_ID || "tu-pipeline-id";
 
 const anthropic = new Anthropic({ apiKey: ANTHROPIC_API_KEY });
+
+// Helper: headers base para todas las llamadas a GHL
+const ghlHeaders = (version = "2021-07-28", extra = {}) => ({
+  Authorization: `Bearer ${GHL_API_KEY}`,
+  "Content-Type": "application/json",
+  Version: version,
+  Location: GHL_LOCATION_ID,
+  ...extra,
+});
 
 // ============================================
 // ALMACEN DE CONVERSACIONES (en memoria)
@@ -244,11 +254,7 @@ async function saveEmailToGHL(contactId, email) {
       `https://services.leadconnectorhq.com/contacts/${contactId}`,
       {
         method: "PUT",
-        headers: {
-          Authorization: `Bearer ${GHL_API_KEY}`,
-          "Content-Type": "application/json",
-          Version: "2021-07-28",
-        },
+        headers: ghlHeaders("2021-07-28"),
         body: JSON.stringify({
           email: email,
           tags: ["email_capturado"],
@@ -381,10 +387,7 @@ async function sendReplyToGHL(contactId, message) {
       `https://services.leadconnectorhq.com/conversations/search?contactId=${contactId}`,
       {
         method: "GET",
-        headers: {
-          Authorization: `Bearer ${GHL_API_KEY}`,
-          Version: "2021-04-15",
-        },
+        headers: ghlHeaders("2021-04-15"),
       }
     );
     const searchData = await searchResponse.json();
@@ -399,11 +402,7 @@ async function sendReplyToGHL(contactId, message) {
       `https://services.leadconnectorhq.com/conversations/messages`,
       {
         method: "POST",
-        headers: {
-          Authorization: `Bearer ${GHL_API_KEY}`,
-          "Content-Type": "application/json",
-          Version: "2021-04-15",
-        },
+        headers: ghlHeaders("2021-04-15"),
         body: JSON.stringify({
           type: "InstagramDM",
           contactId: contactId,
@@ -469,10 +468,7 @@ app.post("/webhook/stripe", async (req, res) => {
       const searchRes = await fetch(
         `https://services.leadconnectorhq.com/contacts/search/duplicate?email=${email}`,
         {
-          headers: {
-            Authorization: `Bearer ${GHL_API_KEY}`,
-            Version: "2021-07-28",
-          },
+          headers: ghlHeaders("2021-07-28"),
         }
       );
       const searchData = await searchRes.json();
@@ -490,11 +486,7 @@ app.post("/webhook/stripe", async (req, res) => {
           `https://services.leadconnectorhq.com/contacts/${contactId}`,
           {
             method: "PUT",
-            headers: {
-              Authorization: `Bearer ${GHL_API_KEY}`,
-              "Content-Type": "application/json",
-              Version: "2021-07-28",
-            },
+            headers: ghlHeaders("2021-07-28"),
             body: JSON.stringify({
               tags: [newTag],
             }),
@@ -525,10 +517,7 @@ app.post("/webhook/skool", async (req, res) => {
     const searchRes = await fetch(
       `https://services.leadconnectorhq.com/contacts/search/duplicate?email=${email}`,
       {
-        headers: {
-          Authorization: `Bearer ${GHL_API_KEY}`,
-          Version: "2021-07-28",
-        },
+        headers: ghlHeaders("2021-07-28"),
       }
     );
     const searchData = await searchRes.json();
@@ -539,11 +528,7 @@ app.post("/webhook/skool", async (req, res) => {
         `https://services.leadconnectorhq.com/contacts/${contactId}`,
         {
           method: "PUT",
-          headers: {
-            Authorization: `Bearer ${GHL_API_KEY}`,
-            "Content-Type": "application/json",
-            Version: "2021-07-28",
-          },
+          headers: ghlHeaders("2021-07-28"),
           body: JSON.stringify({
             tags: ["miembro_activo"],
           }),
