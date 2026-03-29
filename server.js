@@ -803,11 +803,6 @@ async function processBufferedMessages(contactId) {
     return;
   }
 
-  // Delay aleatorio (parecer humano)
-  const delay = Math.floor(Math.random() * (90 - 30 + 1)) + 30;
-  console.log(`Esperando ${delay}s antes de responder a ${contactId}...`);
-  await new Promise((resolve) => setTimeout(resolve, delay * 1000));
-
   // Llamar a Claude
   const claudeResponse = await callClaude(contactId, combinedMessage, tags, pipelineStage);
   state.claudeTimestamps.push(Date.now());
