@@ -996,21 +996,23 @@ ${JSON.stringify(conv)}`,
 // ENDPOINT: Webhooks de GHL
 // ============================================
 app.post("/webhook/ghl", async (req, res) => {
+  console.log("GHL PAYLOAD:", JSON.stringify(req.body));
   const { contact_id, message, contact_name, tags, pipeline_stage } = req.body;
+  const messageText = typeof message === "string" ? message : (message?.body || message?.text || JSON.stringify(message) || "");
 
-  console.log(`Mensaje de ${contact_name} (${contact_id}): ${message}`);
+  console.log(`Mensaje de ${contact_name} (${contact_id}): ${messageText}`);
   res.status(200).json({ status: "processing" });
 
   // Agregar al buffer y esperar 10s por mas mensajes
   if (messageBuffer.has(contact_id)) {
     const buffer = messageBuffer.get(contact_id);
-    buffer.messages.push(message);
+    buffer.messages.push(messageText);
     clearTimeout(buffer.timer);
     buffer.timer = setTimeout(() => processBufferedMessages(contact_id), 10000);
   } else {
     const timer = setTimeout(() => processBufferedMessages(contact_id), 10000);
     messageBuffer.set(contact_id, {
-      messages: [message],
+      messages: [messageText],
       timer,
       tags,
       pipelineStage: pipeline_stage,
