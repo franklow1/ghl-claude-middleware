@@ -566,7 +566,7 @@ async function sendReplyToGHL(contactId, message) {
       return;
     }
 
-    await fetch(`https://services.leadconnectorhq.com/conversations/messages`, {
+    const sendRes = await fetch(`https://services.leadconnectorhq.com/conversations/messages`, {
       method: "POST",
       headers: ghlHeaders("2021-07-28"),
       body: JSON.stringify({
@@ -576,7 +576,8 @@ async function sendReplyToGHL(contactId, message) {
         message,
       }),
     });
-
+    const sendData = await sendRes.json();
+    console.log(`POST conversations/messages [${sendRes.status}]:`, JSON.stringify(sendData).substring(0, 300));
     console.log(`Respuesta enviada a ${contactId}: ${message.substring(0, 50)}...`);
   } catch (error) {
     console.error("Error enviando respuesta a GHL:", error);
