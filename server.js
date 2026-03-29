@@ -70,7 +70,9 @@ async function rIncr(key) {
 const conversations = {};
 
 async function saveConversation(contactId) {
+  const isNew = !(await rGet(`conv:${contactId}`));
   await rSet(`conv:${contactId}`, JSON.stringify(conversations[contactId] || []), REDIS_TTL);
+  if (isNew) await rIncr("metrics:total_conversaciones");
 }
 
 // ============================================
@@ -484,7 +486,11 @@ async function processToolCalls(response, contactId) {
 // FUNCION: Llamar a Claude API
 // ============================================
 async function callClaude(contactId, newMessage, tags, pipelineStage) {
-  if (!conversations[contactId]) conversations[contactId] = [];
+  // Cargar conversacion desde Redis si no está en memoria (lazy load tras reinicio)
+  if (!conversations[contactId]) {
+    const stored = await rGet(`conv:${contactId}`);
+    conversations[contactId] = stored ? JSON.parse(stored) : [];
+  }
 
   conversations[contactId].push({ role: "user", content: newMessage });
 
@@ -1105,7 +1111,7 @@ app.get("/metrics", async (req, res) => {
     const wins = JSON.parse(winsRaw || "[]");
     const losses = JSON.parse(lossesRaw || "[]");
     const playbookTs = await rGet("playbook:updated_at");
-    const totalConvKeys = await rKeys("conv:*");
+    const totalConvCount = parseInt(await rGet("metrics:total_conversaciones") || "0");
 
     const tasa =
       wins.length + losses.length > 0
@@ -1142,7 +1148,7 @@ app.get("/metrics", async (req, res) => {
       Object.entries(perfilCounts).sort((a, b) => b[1] - a[1])[0]?.[0] || null;
 
     res.json({
-      total_conversaciones: totalConvKeys.length,
+      total_conversaciones: totalConvCount,
       ventas_exitosas: wins.length,
       leads_frios: losses.length,
       tasa_conversion: `${tasa}%`,
@@ -1184,29 +1190,7 @@ async function start() {
     try {
       await redis.connect();
 
-      // Cargar conversaciones
-      const convKeys = await rKeys("conv:*");
-      for (const key of convKeys) {
-        const data = await rGet(key);
-        if (data) {
-          const contactId = key.replace("conv:", "");
-          conversations[contactId] = JSON.parse(data);
-        }
-      }
-
-      // Cargar estados de contactos
-      const stateKeys = await rKeys("state:*");
-      for (const key of stateKeys) {
-        const data = await rGet(key);
-        if (data) {
-          const contactId = key.replace("state:", "");
-          const state = JSON.parse(data);
-          state.followUpTimers = []; // reset timers — se pierden al reiniciar
-          contactState.set(contactId, state);
-        }
-      }
-
-      // Cargar playbook
+      // Cargar playbook al arrancar
       const playbookData = await rGet("playbook:current");
       if (playbookData) {
         currentPlaybook = JSON.parse(playbookData);
@@ -1214,9 +1198,8 @@ async function start() {
         console.log("Playbook cargado desde Redis");
       }
 
-      console.log(
-        `Cargadas ${convKeys.length} conversaciones y ${stateKeys.length} estados desde Redis`
-      );
+      // Las conversaciones y estados se cargan bajo demanda cuando llega el primer mensaje
+      console.log("Redis listo. Conversaciones y estados se cargan bajo demanda.");
     } catch (e) {
       console.error("Error conectando Redis al inicio:", e.message);
     }
