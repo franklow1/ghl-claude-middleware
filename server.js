@@ -1,5 +1,6 @@
 const express = require("express");
 const Anthropic = require("@anthropic-ai/sdk");
+const Redis = require("ioredis");
 
 const app = express();
 app.use(express.json());
@@ -25,22 +26,70 @@ const ghlHeaders = (version = "2021-07-28") => ({
 });
 
 // ============================================
+// REDIS
+// ============================================
+const REDIS_TTL = 90 * 24 * 60 * 60; // 90 dias en segundos
+
+let redis = null;
+try {
+  const redisUrl = process.env.REDIS_URL || process.env.REDIS_PRIVATE_URL || "redis://localhost:6379";
+  redis = new Redis(redisUrl, { lazyConnect: true, connectTimeout: 5000 });
+  redis.on("error", (err) => console.error("Redis error:", err.message));
+  redis.on("connect", () => console.log("Redis conectado"));
+} catch (e) {
+  console.error("Redis no disponible, usando solo memoria:", e.message);
+  redis = null;
+}
+
+async function rGet(key) {
+  if (!redis) return null;
+  try { return await redis.get(key); } catch (e) { return null; }
+}
+
+async function rSet(key, value, ttl) {
+  if (!redis) return;
+  try {
+    if (ttl) await redis.set(key, value, "EX", ttl);
+    else await redis.set(key, value);
+  } catch (e) { console.error("Redis set error:", e.message); }
+}
+
+async function rKeys(pattern) {
+  if (!redis) return [];
+  try { return await redis.keys(pattern); } catch (e) { return []; }
+}
+
+async function rIncr(key) {
+  if (!redis) return 0;
+  try { return await redis.incr(key); } catch (e) { return 0; }
+}
+
+// ============================================
 // ALMACEN DE CONVERSACIONES
 // ============================================
 const conversations = {};
 
+async function saveConversation(contactId) {
+  await rSet(`conv:${contactId}`, JSON.stringify(conversations[contactId] || []), REDIS_TTL);
+}
+
 // ============================================
 // ALMACEN DE ESTADO POR CONTACTO
 // ============================================
-// Por contacto guarda:
-//   prospectTimestamps: [],  timestamps de mensajes del prospecto
-//   claudeTimestamps: [],    timestamps de respuestas de Claude
-//   followUpCount: 0,        cuantos follow-ups se han mandado (0-3)
-//   mode: 'conversacion',    'conversacion' | 'post_link'
-//   followUpTimers: [],      IDs de setTimeout para cancelar
-//   tags: [],
-//   pipelineStage: ''
 const contactState = new Map();
+
+async function saveState(contactId) {
+  const state = contactState.get(contactId);
+  if (!state) return;
+  const toSave = { ...state, followUpTimers: [] }; // no guardar handles de timers
+  await rSet(`state:${contactId}`, JSON.stringify(toSave), REDIS_TTL);
+}
+
+// ============================================
+// SISTEMA DE APRENDIZAJE — PLAYBOOK EN MEMORIA
+// ============================================
+let currentPlaybook = null; // se carga desde Redis al arrancar
+let playbookUpdatedAt = null;
 
 // ============================================
 // BUFFER DE MENSAJES (agrupacion 10s)
@@ -300,30 +349,37 @@ REGLAS QUE NO SE ROMPEN:
 - NUNCA decir que eres IA ni bot
 - Solo en español neutro`;
 
-const SYSTEM_PROMPTS = {
-  venta_29: _venta_29 + ADDITIONAL_INSTRUCTIONS,
-  upsell_997: _upsell_997 + ADDITIONAL_INSTRUCTIONS,
-  plan_3000: _plan_3000 + ADDITIONAL_INSTRUCTIONS,
-};
-
 // ============================================
-// FUNCION: Determinar que prompt usar
+// FUNCION: Determinar que prompt usar (inyecta playbook si existe)
 // ============================================
 function getSystemPrompt(tags, pipelineStage) {
+  let base;
   if (tags?.includes("plan_3000") || pipelineStage === "plan_vip") {
-    return SYSTEM_PROMPTS.plan_3000;
-  }
-  if (tags?.includes("plan_997") || pipelineStage === "plan_997") {
-    return SYSTEM_PROMPTS.plan_3000;
-  }
-  if (
+    base = _plan_3000 + ADDITIONAL_INSTRUCTIONS;
+  } else if (tags?.includes("plan_997") || pipelineStage === "plan_997") {
+    base = _plan_3000 + ADDITIONAL_INSTRUCTIONS;
+  } else if (
     tags?.includes("miembro_activo") ||
     pipelineStage === "membresia_vendida" ||
     pipelineStage === "upsell_en_proceso"
   ) {
-    return SYSTEM_PROMPTS.upsell_997;
+    base = _upsell_997 + ADDITIONAL_INSTRUCTIONS;
+  } else {
+    base = _venta_29 + ADDITIONAL_INSTRUCTIONS;
   }
-  return SYSTEM_PROMPTS.venta_29;
+
+  if (currentPlaybook) {
+    base += `
+
+========================================
+PLAYBOOK DE VENTAS (generado automaticamente con datos reales de tus conversaciones):
+${JSON.stringify(currentPlaybook, null, 2)}
+
+Usa esta informacion para mejorar tus respuestas. Prioriza las frases y estrategias que han demostrado funcionar en conversaciones reales. Evita los errores documentados. Adapta tu enfoque segun el perfil del prospecto.
+========================================`;
+  }
+
+  return base;
 }
 
 // ============================================
@@ -354,6 +410,10 @@ async function addTagToGHL(contactId, tag) {
       headers: ghlHeaders("2021-07-28"),
       body: JSON.stringify({ tags: [tag] }),
     });
+    // Disparar analisis de aprendizaje segun el tag
+    if (tag === "lead_frio") {
+      analyzeLoss(contactId).catch((e) => console.error("Error analizando perdida:", e));
+    }
   } catch (error) {
     console.error(`Error agregando tag ${tag} a ${contactId}:`, error);
   }
@@ -404,7 +464,10 @@ async function processToolCalls(response, contactId) {
             : SKOOL_PAYMENT_LINK_997;
         // Cambiar modo a post_link para follow-ups
         const state = contactState.get(contactId);
-        if (state) state.mode = "post_link";
+        if (state) {
+          state.mode = "post_link";
+          await saveState(contactId);
+        }
         toolResults.push({
           type: "tool_result",
           tool_use_id: block.id,
@@ -462,6 +525,10 @@ async function callClaude(contactId, newMessage, tags, pipelineStage) {
       textResponse || "Hey, perdona, tuve un problema. Escribeme de nuevo.";
 
     conversations[contactId].push({ role: "assistant", content: finalMessage });
+
+    // Persistir conversacion en Redis
+    await saveConversation(contactId);
+
     return finalMessage;
   } catch (error) {
     console.error("Error llamando a Claude:", error);
@@ -549,7 +616,7 @@ function isWithinHours() {
 function msUntil9amTomorrow() {
   const tomorrow = new Date();
   tomorrow.setDate(tomorrow.getDate() + 1);
-  tomorrow.setHours(9, Math.floor(Math.random() * 5), 0, 0); // 9:00-9:04 para no parecer automatico
+  tomorrow.setHours(9, Math.floor(Math.random() * 5), 0, 0);
   return tomorrow - Date.now();
 }
 
@@ -601,6 +668,7 @@ function scheduleOneFollowUp(contactId, delayMs, followUpNumber, instruction) {
 
       if (!conversations[contactId]) conversations[contactId] = [];
       conversations[contactId].push({ role: "assistant", content: text });
+      await saveConversation(contactId);
 
       await sendReplyToGHL(contactId, text);
       currentState.claudeTimestamps.push(Date.now());
@@ -695,6 +763,7 @@ async function processBufferedMessages(contactId) {
     const response = "jaja perdona, ahora no puedo escuchar audios, me lo escribes?";
     if (!conversations[contactId]) conversations[contactId] = [];
     conversations[contactId].push({ role: "assistant", content: response });
+    await saveConversation(contactId);
     await sendReplyToGHL(contactId, response);
     return;
   }
@@ -710,6 +779,9 @@ async function processBufferedMessages(contactId) {
 
   // Remover tag lead_frio si existia
   await removeTagFromGHL(contactId, "lead_frio");
+
+  // Persistir estado
+  await saveState(contactId);
 
   // Verificar horario
   const hour = new Date().getHours();
@@ -732,6 +804,180 @@ async function processBufferedMessages(contactId) {
 
   // Agendar follow-ups
   scheduleFollowUps(contactId);
+}
+
+// ============================================
+// SISTEMA DE APRENDIZAJE
+// ============================================
+
+async function checkAndUpdatePlaybook() {
+  try {
+    const count = parseInt(await rGet("metrics:analyses_count") || "0");
+    if (count > 0 && count % 5 === 0) {
+      console.log(`Generando nuevo playbook con ${count} analisis acumulados...`);
+      await generatePlaybook();
+    }
+  } catch (e) {
+    console.error("Error verificando playbook:", e);
+  }
+}
+
+async function generatePlaybook() {
+  try {
+    const winsRaw = await rGet("wins:all");
+    const lossesRaw = await rGet("losses:all");
+    const wins = JSON.parse(winsRaw || "[]");
+    const losses = JSON.parse(lossesRaw || "[]");
+
+    if (wins.length + losses.length === 0) return;
+
+    const allData = JSON.stringify({ wins, losses }, null, 2);
+
+    const response = await anthropic.messages.create({
+      model: "claude-sonnet-4-20250514",
+      max_tokens: 2000,
+      messages: [
+        {
+          role: "user",
+          content: `Eres un experto en ventas por DM. Tienes acceso a datos reales de conversaciones — cuales funcionaron y cuales no. Con esta informacion, genera un PLAYBOOK actualizado en formato JSON:
+{
+  "mejores_frases": ["lista de las frases exactas que mas convirtieron"],
+  "mejores_testimonios": ["lista de que testimonios funcionaron mejor y para que tipo de prospecto"],
+  "objeciones_frecuentes": [{"objecion": "texto", "mejor_respuesta": "la respuesta que mejor funciono"}],
+  "patrones_de_exito": ["lista de patrones que se repiten en ventas exitosas"],
+  "errores_a_evitar": ["lista de cosas que hicieron que se perdieran ventas"],
+  "perfiles_dificiles": [{"perfil": "tipo", "estrategia_recomendada": "como manejarlos"}],
+  "tiempo_promedio_cierre": "numero promedio de mensajes para cerrar",
+  "mejor_momento_pedir_email": "en que momento de la conversacion funciona mejor pedir el email",
+  "insights_nuevos": ["cualquier patron o insight que no estaba en el playbook anterior"]
+}
+Responde SOLO el JSON, nada mas.
+
+DATOS:
+${allData}`,
+        },
+      ],
+    });
+
+    const text = response.content[0]?.text || "";
+    const jsonMatch = text.match(/\{[\s\S]*\}/);
+    if (!jsonMatch) {
+      console.error("No se pudo parsear JSON del playbook");
+      return;
+    }
+
+    const playbook = JSON.parse(jsonMatch[0]);
+    currentPlaybook = playbook;
+    playbookUpdatedAt = new Date().toISOString();
+
+    await rSet("playbook:current", JSON.stringify(playbook));
+    await rSet("playbook:updated_at", playbookUpdatedAt);
+
+    console.log("Playbook actualizado con", wins.length, "wins y", losses.length, "losses");
+  } catch (e) {
+    console.error("Error generando playbook:", e);
+  }
+}
+
+async function analyzeWin(contactId) {
+  try {
+    const conv = conversations[contactId];
+    if (!conv || conv.length < 4) return;
+
+    const response = await anthropic.messages.create({
+      model: "claude-sonnet-4-20250514",
+      max_tokens: 600,
+      messages: [
+        {
+          role: "user",
+          content: `Analiza esta conversacion de venta exitosa. Extrae en formato JSON:
+{
+  "perfil_prospecto": "descripcion corta del tipo de persona (principiante, con experiencia, esceptico, etc)",
+  "dolor_principal": "cual era su problema o frustracion principal",
+  "objecion_principal": "cual fue la objecion mas fuerte que puso, o null si no hubo",
+  "que_funciono": "que frase, argumento o momento fue el punto de inflexion que lo convencio",
+  "testimonio_usado": "que testimonio se uso y si fue efectivo",
+  "mensajes_hasta_cierre": 0,
+  "patron": "descripcion de una linea del patron de esta venta exitosa"
+}
+Responde SOLO el JSON, nada mas.
+
+CONVERSACION:
+${JSON.stringify(conv)}`,
+        },
+      ],
+    });
+
+    const text = response.content[0]?.text || "";
+    const jsonMatch = text.match(/\{[\s\S]*\}/);
+    if (!jsonMatch) return;
+
+    const analysis = JSON.parse(jsonMatch[0]);
+    analysis.contact_id = contactId;
+    analysis.timestamp = new Date().toISOString();
+
+    const winsRaw = await rGet("wins:all");
+    const wins = JSON.parse(winsRaw || "[]");
+    wins.push(analysis);
+    await rSet("wins:all", JSON.stringify(wins));
+
+    await rIncr("metrics:analyses_count");
+    await checkAndUpdatePlaybook();
+
+    console.log(`Win analizado para ${contactId}: ${analysis.patron}`);
+  } catch (e) {
+    console.error("Error analizando win:", e);
+  }
+}
+
+async function analyzeLoss(contactId) {
+  try {
+    const conv = conversations[contactId];
+    if (!conv || conv.length < 2) return;
+
+    const response = await anthropic.messages.create({
+      model: "claude-sonnet-4-20250514",
+      max_tokens: 600,
+      messages: [
+        {
+          role: "user",
+          content: `Analiza esta conversacion donde el prospecto no compro. Extrae en formato JSON:
+{
+  "perfil_prospecto": "descripcion corta del tipo de persona",
+  "dolor_principal": "cual era su problema",
+  "punto_de_quiebre": "en que momento exacto se enfrio la conversacion y por que",
+  "que_fallo": "que se podria haber hecho diferente para no perderlo",
+  "objecion_no_resuelta": "cual fue la objecion que no se logro manejar",
+  "leccion": "que aprendizaje se saca de esta conversacion perdida"
+}
+Responde SOLO el JSON, nada mas.
+
+CONVERSACION:
+${JSON.stringify(conv)}`,
+        },
+      ],
+    });
+
+    const text = response.content[0]?.text || "";
+    const jsonMatch = text.match(/\{[\s\S]*\}/);
+    if (!jsonMatch) return;
+
+    const analysis = JSON.parse(jsonMatch[0]);
+    analysis.contact_id = contactId;
+    analysis.timestamp = new Date().toISOString();
+
+    const lossesRaw = await rGet("losses:all");
+    const losses = JSON.parse(lossesRaw || "[]");
+    losses.push(analysis);
+    await rSet("losses:all", JSON.stringify(losses));
+
+    await rIncr("metrics:analyses_count");
+    await checkAndUpdatePlaybook();
+
+    console.log(`Loss analizado para ${contactId}: ${analysis.leccion}`);
+  } catch (e) {
+    console.error("Error analizando loss:", e);
+  }
 }
 
 // ============================================
@@ -795,9 +1041,11 @@ app.post("/webhook/stripe", async (req, res) => {
           }
         );
 
-        // Cancelar follow-ups post_link si pago
         cancelFollowUpTimers(contactId);
         console.log(`Contacto ${contactId} actualizado: tag=${newTag}`);
+
+        // Analizar venta exitosa
+        analyzeWin(contactId).catch((e) => console.error("Error analizando win:", e));
       } else {
         console.log(`No se encontro contacto con email ${email} en GHL`);
       }
@@ -836,6 +1084,9 @@ app.post("/webhook/skool", async (req, res) => {
       );
       cancelFollowUpTimers(contactId);
       console.log(`Miembro Skool ${email} vinculado a contacto ${contactId}`);
+
+      // Analizar venta exitosa
+      analyzeWin(contactId).catch((e) => console.error("Error analizando win:", e));
     }
   } catch (error) {
     console.error("Error procesando webhook Skool:", error);
@@ -845,15 +1096,80 @@ app.post("/webhook/skool", async (req, res) => {
 });
 
 // ============================================
+// ENDPOINT: Metricas del sistema de aprendizaje
+// ============================================
+app.get("/metrics", async (req, res) => {
+  try {
+    const winsRaw = await rGet("wins:all");
+    const lossesRaw = await rGet("losses:all");
+    const wins = JSON.parse(winsRaw || "[]");
+    const losses = JSON.parse(lossesRaw || "[]");
+    const playbookTs = await rGet("playbook:updated_at");
+    const totalConvKeys = await rKeys("conv:*");
+
+    const tasa =
+      wins.length + losses.length > 0
+        ? ((wins.length / (wins.length + losses.length)) * 100).toFixed(1)
+        : "0.0";
+
+    const avgCierre =
+      wins.length > 0
+        ? (
+            wins.reduce((a, b) => a + (b.mensajes_hasta_cierre || 0), 0) /
+            wins.length
+          ).toFixed(1)
+        : null;
+
+    // Objecion mas comun (de wins y losses)
+    const objCounts = {};
+    [...wins, ...losses].forEach((a) => {
+      const obj = a.objecion_principal || a.objecion_no_resuelta;
+      if (obj && obj !== "null" && obj !== null) {
+        objCounts[obj] = (objCounts[obj] || 0) + 1;
+      }
+    });
+    const objecionMasComun =
+      Object.entries(objCounts).sort((a, b) => b[1] - a[1])[0]?.[0] || null;
+
+    // Perfil que mas convierte
+    const perfilCounts = {};
+    wins.forEach((w) => {
+      if (w.perfil_prospecto) {
+        perfilCounts[w.perfil_prospecto] = (perfilCounts[w.perfil_prospecto] || 0) + 1;
+      }
+    });
+    const perfilQueMasConvierte =
+      Object.entries(perfilCounts).sort((a, b) => b[1] - a[1])[0]?.[0] || null;
+
+    res.json({
+      total_conversaciones: totalConvKeys.length,
+      ventas_exitosas: wins.length,
+      leads_frios: losses.length,
+      tasa_conversion: `${tasa}%`,
+      tiempo_promedio_cierre: avgCierre ? `${avgCierre} mensajes` : null,
+      ultimo_playbook: playbookTs || null,
+      objecion_mas_comun: objecionMasComun,
+      perfil_que_mas_convierte: perfilQueMasConvierte,
+      redis_disponible: redis !== null,
+    });
+  } catch (e) {
+    console.error("Error en /metrics:", e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// ============================================
 // HEALTH CHECK
 // ============================================
 app.get("/", (req, res) => {
   res.json({
     status: "running",
-    service: "GHL-Claude Sales Middleware v3",
+    service: "GHL-Claude Sales Middleware v4",
     timestamp: new Date().toISOString(),
     activeContacts: contactState.size,
     bufferedMessages: messageBuffer.size,
+    playbookActivo: currentPlaybook !== null,
+    redisConectado: redis !== null,
   });
 });
 
@@ -861,6 +1177,54 @@ app.get("/", (req, res) => {
 // INICIAR SERVIDOR
 // ============================================
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => {
-  console.log(`Middleware corriendo en puerto ${PORT}`);
-});
+
+async function start() {
+  // Conectar Redis y cargar datos persistidos
+  if (redis) {
+    try {
+      await redis.connect();
+
+      // Cargar conversaciones
+      const convKeys = await rKeys("conv:*");
+      for (const key of convKeys) {
+        const data = await rGet(key);
+        if (data) {
+          const contactId = key.replace("conv:", "");
+          conversations[contactId] = JSON.parse(data);
+        }
+      }
+
+      // Cargar estados de contactos
+      const stateKeys = await rKeys("state:*");
+      for (const key of stateKeys) {
+        const data = await rGet(key);
+        if (data) {
+          const contactId = key.replace("state:", "");
+          const state = JSON.parse(data);
+          state.followUpTimers = []; // reset timers — se pierden al reiniciar
+          contactState.set(contactId, state);
+        }
+      }
+
+      // Cargar playbook
+      const playbookData = await rGet("playbook:current");
+      if (playbookData) {
+        currentPlaybook = JSON.parse(playbookData);
+        playbookUpdatedAt = await rGet("playbook:updated_at");
+        console.log("Playbook cargado desde Redis");
+      }
+
+      console.log(
+        `Cargadas ${convKeys.length} conversaciones y ${stateKeys.length} estados desde Redis`
+      );
+    } catch (e) {
+      console.error("Error conectando Redis al inicio:", e.message);
+    }
+  }
+
+  app.listen(PORT, () => {
+    console.log(`Middleware corriendo en puerto ${PORT}`);
+  });
+}
+
+start();
