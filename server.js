@@ -555,10 +555,10 @@ async function sendReplyToGHL(contactId, message) {
   try {
     const searchResponse = await fetch(
       `https://services.leadconnectorhq.com/conversations/search?contactId=${contactId}&limit=1`,
-      { method: "GET", headers: ghlHeaders("2021-04-15") }
+      { method: "GET", headers: ghlHeaders("2021-07-28") }
     );
     const searchData = await searchResponse.json();
-    console.log(`Busqueda conversacion ${contactId}:`, JSON.stringify(searchData).substring(0, 300));
+    console.log(`Busqueda conversacion ${contactId} [${searchResponse.status}]:`, JSON.stringify(searchData).substring(0, 300));
     const conversationId = searchData.conversations?.[0]?.id;
 
     if (!conversationId) {
@@ -568,7 +568,7 @@ async function sendReplyToGHL(contactId, message) {
 
     await fetch(`https://services.leadconnectorhq.com/conversations/messages`, {
       method: "POST",
-      headers: ghlHeaders("2021-04-15"),
+      headers: ghlHeaders("2021-07-28"),
       body: JSON.stringify({
         type: "InstagramDM",
         contactId,
