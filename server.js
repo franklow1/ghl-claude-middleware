@@ -222,6 +222,7 @@ emojis con moderacion
 sin puntos finales siempre
 NUNCA bullets, NUNCA dashes (-), NUNCA guiones, NUNCA listas
 suenas como alguien escribiendo rapido desde el cel
+NUNCA termines un mensaje con punto (.). Si el mensaje es corto, simplemente no pongas punto al final. Solo usa punto en medio de una oracion para separar ideas, nunca al final del mensaje.
 
 REGLA #0 — NO SUENES A CHATGPT:
 PROHIBIDO: "que bueno", "excelente", "eso es genial", "que interesante", "perfecto", "sin duda", "tienes mentalidad de X", "eso te va a ayudar mucho", "me alegra", "perfecto"
@@ -233,11 +234,13 @@ REGLA #1 — MAXIMO 2 ORACIONES POR TURNO
 REGLA #2 — SIEMPRE TERMINA CON PREGUNTA (excepto al mandar link)
 ESTO INCLUYE EL PASO 4. Cuando presentes la solucion SIEMPRE termina con "sientes que eso te ayudaria?" o algo similar NUNCA dejes el mensaje de la solucion sin pregunta al final. Si tu mensaje no termina en ? esta mal y perdiste la venta.
 
-REGLA #2B — SI MANDAS 2 MENSAJES, EL ULTIMO SIEMPRE ES LA PREGUNTA:
-El primer mensaje puede ser un acknowledge corto. El segundo SIEMPRE termina en pregunta (?).
+REGLA #2B — SI MANDAS 2 O 3 MENSAJES, EL ULTIMO SIEMPRE ES LA PREGUNTA:
+El primer mensaje es el acknowledge corto SIN punto final. El ultimo SIEMPRE termina en pregunta (?).
 Ejemplo correcto: mensaje 1: si, el trading es muy riesgoso sin el conocimiento correcto. mensaje 2: y despues de esa experiencia, que es lo que mas te gustaria que fuera diferente esta vez?
 Ejemplo incorrecto: mensaje 1: si, el trading es muy riesgoso sin el conocimiento correcto. mensaje 2: esa sensacion de perder dinero que invertiste es horrible.
 SIEMPRE el ultimo mensaje del turno tiene pregunta. Sin excepcion.
+
+REGLA CRITICA: La conversacion NUNCA puede quedarse sin pregunta. Si tu ultimo mensaje no termina en ? la persona no tiene nada que responder y la conversacion muere. Esto es lo peor que puede pasar. SIEMPRE que mandes 2 mensajes, el primero es el acknowledge corto SIN punto final, y el segundo es la pregunta. Si por alguna razon tu respuesta no tiene pregunta, agrega una. Ejemplos de preguntas de emergencia: que opinas? te hace sentido? te ha pasado eso?
 
 REGLA #3 — ACKNOWLEDGE SIEMPRE LO QUE DICE:
 Antes de tu pregunta, reconoce brevemente lo que dijo la persona. No lo ignores. Pero hazlo corto, no con halagos de IA.
@@ -644,28 +647,46 @@ function splitMessage(text) {
 
   const cleaned = text.trim().replace(/\n{2,}/g, "\n");
 
-  // Si es corto y de una sola línea, mandarlo tal cual
-  if (cleaned.length <= 160 && !cleaned.includes("\n")) return [cleaned];
-
-  // Dividir primero por saltos de línea
-  const byLines = cleaned.split("\n").map(l => l.trim()).filter(l => l.length > 0);
-
-  const parts = [];
-  for (const line of byLines) {
-    if (line.length <= 160) {
-      parts.push(line);
-    } else {
-      // Dividir líneas largas por oraciones (., ?, !)
-      const sentences = line.split(/(?<=[.?!])\s+/);
-      for (const s of sentences) {
-        const trimmed = s.trim();
-        if (trimmed) parts.push(trimmed);
+  // Si tiene saltos de línea, dividir por ahí primero
+  if (cleaned.includes("\n")) {
+    const byLines = cleaned.split("\n").map(l => l.trim()).filter(l => l.length > 0);
+    const parts = [];
+    for (const line of byLines) {
+      if (line.length <= 160) {
+        parts.push(line);
+      } else {
+        const sentences = line.split(/(?<=[.?!])\s+/);
+        for (const s of sentences) {
+          const trimmed = s.trim();
+          if (trimmed) parts.push(trimmed);
+        }
       }
     }
+    // Máximo 3 mensajes, el último siempre debe ser pregunta
+    const filtered = parts.filter(p => p.length > 0).slice(0, 3);
+    return filtered;
   }
 
-  // Máximo 2 mensajes por turno
-  return parts.filter(p => p.length > 0).slice(0, 2);
+  // Si es una sola línea corta, mandarla tal cual
+  if (cleaned.length <= 160) return [cleaned];
+
+  // Línea larga de una sola línea — intentar dividir en acknowledge + pregunta
+  // Patrón: "texto. y pregunta?" o "texto y pregunta?"
+  const splitOnY = cleaned.match(/^(.+?[.!])\s+(y\s+.+\?)$/i);
+  if (splitOnY) {
+    return [splitOnY[1].trim(), splitOnY[2].trim()];
+  }
+
+  // Dividir por oraciones
+  const sentences = cleaned.split(/(?<=[.?!])\s+/);
+  const parts = [];
+  for (const s of sentences) {
+    const trimmed = s.trim();
+    if (trimmed) parts.push(trimmed);
+  }
+
+  // Máximo 3 mensajes, el último siempre debe ser pregunta
+  return parts.filter(p => p.length > 0).slice(0, 3);
 }
 
 // ============================================
