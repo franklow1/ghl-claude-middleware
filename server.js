@@ -331,11 +331,11 @@ Usa send_payment_link("membresia_199")
 "aqui esta el link, avisame una vez que entres 🙌🏻"
 
 R — REINFORCE + FOLLOW UP:
-PASO 7 — FOLLOW UP OBLIGATORIO (esto es critico):
-Si la persona no responde despues del link, haz follow up:
-Primer follow up: "pudiste entrar? si tienes alguna duda me dices"
-Segundo follow up: "por cierto, tengo un alumno que estaba en la misma situacion que tu y en menos de un mes ya tenia clientes, el sistema funciona si lo sigues"
-Tercer follow up: "sin presion, pero queria decirte que los que entran y empiezan rapido son los que mejores resultados tienen"
+PASO 7 — FOLLOW UP OBLIGATORIO:
+Si la persona no responde despues del link:
+Follow up 1 (15 minutos): "pudiste entrar? si tienes alguna duda me dices"
+Follow up 2 (6 horas): "por cierto, tengo un alumno que estaba en tu misma situacion y en menos de un mes ya tenia clientes"
+Follow up 3 (24 horas): "sin presion, pero los que entran rapido son los que mejores resultados tienen. aqui estoy si te animas 🙌🏻"
 NUNCA te quedes callado despues de mandar el link
 
 REGLAS ABSOLUTAS:
@@ -879,26 +879,26 @@ function scheduleFollowUps(contactId) {
       `Ultimo mensaje. Algo breve y sin presion tipo "por cierto, si algun dia quieres retomar esto me escribes y seguimos donde nos quedamos". Despues de esto no se mandan mas mensajes a menos que el prospecto escriba primero.`
     );
   } else {
-    // post_link
+    // post_link: 15 min, 6 horas, 24 horas
     scheduleOneFollowUp(
       contactId,
-      2 * 60 * 60 * 1000,
+      15 * 60 * 1000,
       1,
-      `El prospecto tiene el link pero no ha pagado. NO preguntes si pago. Manda algo que refuerce la decision — un resultado especifico de alguien similar, algo que va a encontrar adentro, o anticipa una duda comun y resuelvela. Maximo 2 lineas.`
+      `El prospecto tiene el link pero no ha respondido. Pregunta si pudo entrar y si tiene alguna duda. Maximo 1 linea. Algo como "pudiste entrar? si tienes alguna duda me dices"`
+    );
+
+    scheduleOneFollowUp(
+      contactId,
+      6 * 60 * 60 * 1000,
+      2,
+      `Han pasado 6 horas. Comparte un testimonio de alguien en una situacion similar al prospecto. Maximo 1-2 lineas. Natural, no como vendedor. Algo como "por cierto, tengo un alumno que estaba en tu misma situacion y en menos de un mes ya tenia clientes"`
     );
 
     scheduleOneFollowUp(
       contactId,
       24 * 60 * 60 * 1000,
-      2,
-      `Un dia despues. Manda algo natural que aporte valor y sutilmente recuerde la oportunidad. Puede ser "por cierto, si te genera duda algo del proceso me dices". Sin presion.`
-    );
-
-    scheduleOneFollowUp(
-      contactId,
-      72 * 60 * 60 * 1000,
       3,
-      `Ultimo mensaje. "Sin presion, cuando estes listo aqui estoy." Corto. Despues de esto no se mandan mas.`
+      `Ultimo follow up. Sin presion. Algo como "sin presion, pero los que entran rapido son los que mejores resultados tienen. aqui estoy si te animas". Corto. Despues de esto no se mandan mas mensajes a menos que el prospecto escriba primero.`
     );
   }
 
