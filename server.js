@@ -855,30 +855,23 @@ function scheduleFollowUps(contactId) {
   cancelFollowUpTimers(contactId);
   state.followUpCount = 0;
 
-  if (state.mode === "conversacion") {
-    const fu1Delay = calcFirstFollowUpDelay(state);
+  // Detecta en que etapa del flujo se corto la conversacion
+  const conv = conversations[contactId] || [];
+  const lastMessages = conv.slice(-4).map(m => m.content).join(" ").toLowerCase();
+  let etapa = "inicio";
+  if (lastMessages.includes("link") || lastMessages.includes("skool") || lastMessages.includes("acceso")) {
+    etapa = "post_link";
+  } else if (lastMessages.includes("correo") || lastMessages.includes("email")) {
+    etapa = "pidiendo_email";
+  } else if (lastMessages.includes("sientes que") || lastMessages.includes("serviria") || lastMessages.includes("ayudaria")) {
+    etapa = "presentando_solucion";
+  } else if (lastMessages.includes("logrado") || lastMessages.includes("faltado") || lastMessages.includes("intentado")) {
+    etapa = "buscando_dolor";
+  } else if (lastMessages.includes("lograr") || lastMessages.includes("meta") || lastMessages.includes("gustaria")) {
+    etapa = "buscando_deseo";
+  }
 
-    scheduleOneFollowUp(
-      contactId,
-      fu1Delay,
-      1,
-      `El prospecto dejo de responder. Analiza el ultimo intercambio e infiere por que se enfrio. No mandes un "follow-up". Manda algo que parezca que se te acaba de ocurrir y que sea relevante a su situacion especifica. Puede ser un testimonio nuevo, algo que acabas de ver, o un angulo diferente que conecte con el dolor que te compartio. NO digas "oye no se si viste mi mensaje" ni "te escribo de nuevo". Maximo 2 lineas. Tiene que sonar como un mensaje nuevo, no como persecucion.`
-    );
-
-    scheduleOneFollowUp(
-      contactId,
-      6 * 60 * 60 * 1000,
-      2,
-      `Pasaron varias horas sin respuesta. Analiza que fue lo ultimo que se dijo y por que pudo haberse enfriado. Si parece que tenia una duda sin resolver, resuelvela sin que te la pida. Si parece que necesitaba mas prueba social, comparte un resultado diferente. Si simplemente se distrajo, manda algo que aporte valor puro. Maximo 2 lineas. Que se sienta como contenido, no como seguimiento.`
-    );
-
-    scheduleOneFollowUp(
-      contactId,
-      24 * 60 * 60 * 1000,
-      3,
-      `Ultimo mensaje. Algo breve y sin presion tipo "por cierto, si algun dia quieres retomar esto me escribes y seguimos donde nos quedamos". Despues de esto no se mandan mas mensajes a menos que el prospecto escriba primero.`
-    );
-  } else {
+  if (state.mode === "post_link" || etapa === "post_link") {
     // post_link: 15 min, 6 horas, 24 horas
     scheduleOneFollowUp(
       contactId,
@@ -891,18 +884,48 @@ function scheduleFollowUps(contactId) {
       contactId,
       6 * 60 * 60 * 1000,
       2,
-      `Han pasado 6 horas. Comparte un testimonio de alguien en una situacion similar al prospecto. Maximo 1-2 lineas. Natural, no como vendedor. Algo como "por cierto, tengo un alumno que estaba en tu misma situacion y en menos de un mes ya tenia clientes"`
+      `Han pasado 6 horas desde que mandaste el link. Comparte un testimonio relevante a su situacion. Maximo 1-2 lineas. Natural, no de vendedor. Algo como "por cierto, tengo un alumno que estaba en tu misma situacion y en menos de un mes ya tenia clientes"`
     );
 
     scheduleOneFollowUp(
       contactId,
       24 * 60 * 60 * 1000,
       3,
-      `Ultimo follow up. Sin presion. Algo como "sin presion, pero los que entran rapido son los que mejores resultados tienen. aqui estoy si te animas". Corto. Despues de esto no se mandan mas mensajes a menos que el prospecto escriba primero.`
+      `Ultimo follow up post-link. Sin presion. Algo como "sin presion, pero los que entran rapido son los que mejores resultados tienen. aqui estoy si te animas". Despues de esto no se mandan mas mensajes a menos que el prospecto escriba primero.`
+    );
+
+  } else {
+    // Conversacion activa — follow ups adaptativos segun etapa
+    const fu1Delay = calcFirstFollowUpDelay(state);
+
+    const instrFu1 = etapa === "presentando_solucion"
+      ? `El prospecto se enfrio justo cuando le presentaste la solucion. Probablemente tiene una duda o necesita mas conviccion. NO repitas la presentacion. Manda algo que resuelva una duda comun sin que te la pida, o comparte un resultado de alguien en su misma situacion. Maximo 2 lineas. Que suene natural, no como vendedor.`
+      : etapa === "pidiendo_email"
+      ? `El prospecto se enfrio cuando le pediste el email. Probablemente tiene duda sobre el precio o el compromiso. Manda algo que baje la friccion — recuerdale que puede ver todo el detalle en el link o que no hay nada que perder. Maximo 2 lineas.`
+      : etapa === "buscando_dolor"
+      ? `El prospecto se abrio sobre sus problemas y luego se fue. Probablemente se sintio expuesto o le parecio que iba a venderle algo. Manda algo que retome la conexion desde el lado humano, no desde la venta. Puede ser algo relacionado a lo que te conto. Maximo 2 lineas.`
+      : etapa === "buscando_deseo"
+      ? `El prospecto empezo a contarte lo que quiere lograr y luego se corto. Retoma desde ahi. Pregunta algo que lo haga pensar en su objetivo, no en el producto. Maximo 2 lineas.`
+      : `El prospecto dejo de responder al inicio de la conversacion. Manda algo que genere curiosidad o que sea relevante al tipo de persona que te escribe por Instagram. No menciones la comunidad todavia. Maximo 2 lineas. Que suene como algo que se te acabo de ocurrir.`;
+
+    scheduleOneFollowUp(contactId, fu1Delay, 1, instrFu1);
+
+    scheduleOneFollowUp(
+      contactId,
+      6 * 60 * 60 * 1000,
+      2,
+      `Pasaron varias horas sin respuesta. Analiza donde se corto la conversacion y por que pudo haberse enfriado. Si tenia una duda sin resolver, resuelvela. Si necesitaba mas prueba social, comparte un resultado diferente. Si simplemente se distrajo, manda algo que aporte valor. Maximo 2 lineas. Que se sienta como contenido, no como seguimiento.`
+    );
+
+    scheduleOneFollowUp(
+      contactId,
+      24 * 60 * 60 * 1000,
+      3,
+      `Ultimo intento. Algo breve y sin presion. Algo como "oye, si algun dia quieres retomar esto me escribes y seguimos donde nos quedamos". Despues de esto no se mandan mas mensajes a menos que el prospecto escriba primero.`
     );
   }
 
-  console.log(`Follow-ups agendados para ${contactId} (modo: ${state.mode})`);
+  console.log(`Follow-ups agendados para ${contactId} (modo: ${state.mode}, etapa: ${etapa})`);
 }
 
 // ============================================
